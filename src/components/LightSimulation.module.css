@@ -1,0 +1,177 @@
+/* ============================================================
+   LIGHT SIMULATION — Visual bulb + glow effects
+   ============================================================ */
+
+.room {
+  position: relative;
+  height: 120px;
+  background: linear-gradient(180deg, #0d0f15 0%, #13151d 100%);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+/* Ambient room glow when lights are on */
+.ambientGlow {
+  position: absolute;
+  inset: 0;
+  transition: all 0.8s ease;
+  animation: ambientFadeIn 0.6s ease both;
+}
+
+/* Light fixtures row */
+.fixtures {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  padding-top: 6px;
+  position: relative;
+  z-index: 2;
+}
+
+.fixtureWrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+/* Ceiling mount */
+.mount {
+  width: 18px;
+  height: 4px;
+  background: #2a2a35;
+  border-radius: 2px;
+}
+
+/* Cord */
+.cord {
+  width: 2px;
+  height: 10px;
+  background: #2a2a35;
+}
+
+/* The bulb itself */
+.bulb {
+  width: 32px;
+  height: 32px;
+  border-radius: 50% 50% 45% 45%;
+  background: #1e1e28;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+  transition: all 0.5s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bulbOn {
+  border-color: rgba(255, 255, 255, 0.1);
+  animation: bulbTurnOn 0.4s var(--ease-out) both;
+}
+
+/* Inner bright core */
+.innerGlow {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  opacity: 0.9;
+  animation: breatheGlow 2.5s ease-in-out infinite;
+}
+
+/* Outer glow ring */
+.outerGlow {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  animation: breatheGlow 2.5s ease-in-out infinite;
+}
+
+/* Emergency pulse ring */
+.pulseRing {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid;
+  animation: emergencyPulse 1s ease-out infinite;
+}
+
+/* Light cone projecting downward */
+.lightCone {
+  position: absolute;
+  top: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 50px;
+  height: 70px;
+  clip-path: polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%);
+  animation: coneFadeIn 0.6s ease both;
+  pointer-events: none;
+}
+
+/* Floor reflection */
+.floorReflection {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  transition: all 0.6s ease;
+  animation: ambientFadeIn 0.8s ease both;
+}
+
+/* ── Animations ── */
+
+@keyframes bulbTurnOn {
+  0% {
+    transform: scale(0.95);
+    filter: brightness(0.3);
+  }
+  50% {
+    transform: scale(1.08);
+    filter: brightness(1.3);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes breatheGlow {
+  0%, 100% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes emergencyPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes coneFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) scaleY(0.3);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) scaleY(1);
+  }
+}
+
+@keyframes ambientFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
