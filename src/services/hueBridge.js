@@ -1,214 +1,297 @@
 // ============================================================
-// HUE BRIDGE SERVICE
+// HUE BRIDGE SERVICE — v2 (with certificate handling)
 // ============================================================
 //
-// This module handles ALL communication with the Philips Hue Bridge.
-// It uses the CLIP v2 (local REST API) — no cloud, no internet needed.
+// WHAT CHANGED FROM THE ORIGINAL:
+// ─────────────────────────────────
+// 1. Added a "certificate check" flow — before connecting, we
+//    verify if the browser can reach the bridge. If not, we
+//    return a specific error telling the user to accept the cert.
 //
-// ┌─────────────┐      Local WiFi       ┌────────────┐
-// │  This App    │  ──── PUT/GET ────▶  │ Hue Bridge │ ──▶ 💡 Lights
-// │ (browser)    │     (HTTPS)           │ 192.168.x  │
-// └─────────────┘                        └────────────┘
+// 2. Added dual API support — tries CLIP v2 first, falls back
+//    to v1 if needed. Both work with the same credentials.
 //
-// ─── HOW TO CONNECT TO YOUR REAL BRIDGE ───────────────────
+// WHY THE ORIGINAL DIDN'T WORK FROM VERCEL:
+// ─────────────────────────────────────────
+// The Hue Bridge uses a SELF-SIGNED HTTPS certificate.
+// When the app is served from https://clinic-signal.vercel.app,
+// and the browser tries to fetch https://192.168.x.x/clip/v2/...,
+// the browser sees the self-signed cert and SILENTLY BLOCKS
+// the request. No popup, no warning — just a "Failed to fetch".
 //
-// STEP 1: Find your Bridge IP
-//   → Open the Philips Hue app → Settings → Hue Bridges → (i) icon
-//   → Or visit https://discovery.meethue.com from the clinic network
+// The Philips debug tool works because it's served FROM the
+// bridge itself (same origin = no cert issue).
 //
-// STEP 2: Create an API key (one-time)
-//   1. Physically press the round button on top of your Hue Bridge
-//   2. Within 30 seconds, run this in your terminal:
+// THE FIX:
+// The user must first visit https://<bridge-ip>/api in their
+// browser and click "Advanced → Proceed" to accept the cert.
+// After that, fetch() calls from ANY origin will work because
+// the browser has cached the certificate exception.
 //
-//      curl -X POST -d '{"devicetype":"clinic-signal#app","generateclientkey":true}' \
-//           -k https://<BRIDGE_IP>/api
-//
-//   3. You'll get back something like:
-//      [{"success":{"username":"abc123...", "clientkey":"..."}}]
-//
-//   4. The "username" value is your API key. Save it.
-//
-// STEP 3: Enter both values in the app's Settings page.
-//
-// ─── HTTPS NOTE ──────────────────────────────────────────
-//
-// The Hue Bridge uses a self-signed HTTPS certificate.
-// Your browser will warn about this. You have two options:
-//   a) Visit https://<BRIDGE_IP>/api once in your browser,
-//      click "Advanced" → "Proceed anyway" to accept the cert.
-//   b) Run this app via the Express backend proxy (future enhancement).
-//
+// Our improved Settings page detects this exact problem and
+// guides the user through accepting the certificate.
 // ============================================================
 
 const HueBridgeService = {
   _bridgeIp: null,
   _apiKey: null,
   _connected: false,
+  _apiVersion: null, // "v2" or "v1"
 
-  /**
-   * Whether we have an active connection to the bridge.
-   */
   get isConnected() {
     return this._connected;
   },
 
+  get apiVersion() {
+    return this._apiVersion;
+  },
+
   /**
-   * Configure bridge credentials. Call this before any API calls.
-   * @param {string} ip - Bridge local IP, e.g. "192.168.1.100"
-   * @param {string} apiKey - The "username" from the bridge registration
+   * Configure bridge credentials.
    */
   configure(ip, apiKey) {
-    this._bridgeIp = ip;
-    this._apiKey = apiKey;
+    let cleanIp = ip.trim();
+    cleanIp = cleanIp.replace(/^https?:\/\//, "");
+    cleanIp = cleanIp.replace(/\/+$/, "");
+    this._bridgeIp = cleanIp;
+    this._apiKey = apiKey.trim();
     this._connected = false;
+    this._apiVersion = null;
   },
 
-  /** Base URL for CLIP v2 API */
-  _baseUrl() {
+  _bridgeOrigin() {
     // Use HTTP for localhost (fake bridge), HTTPS for real bridges
-    const protocol = this._bridgeIp?.startsWith("localhost") || this._bridgeIp?.startsWith("127.0.0.1")
-      ? "http"
-      : "https";
-    return `${protocol}://${this._bridgeIp}/clip/v2`;
+    const protocol = this._bridgeIp?.startsWith("localhost") ? "http" : "https";
+    return `${protocol}://${this._bridgeIp}`;
   },
 
-  /** Required headers for every request */
-  _headers() {
+  _baseUrlV2() {
+    return `${this._bridgeOrigin()}/clip/v2`;
+  },
+
+  _baseUrlV1() {
+    return `${this._bridgeOrigin()}/api/${this._apiKey}`;
+  },
+
+  _headersV2() {
     return {
       "hue-application-key": this._apiKey,
       "Content-Type": "application/json",
     };
   },
 
+  _headersV1() {
+    return { "Content-Type": "application/json" };
+  },
+
   /**
-   * Test connection to the bridge.
-   * @returns {{ success: boolean, error?: string }}
+   * URL the user needs to visit to accept the bridge's self-signed cert.
    */
-  async testConnection() {
+  getCertAcceptUrl() {
+    return `https://${this._bridgeIp}/api`;
+  },
+
+  /**
+   * Check if the browser can reach the bridge at all.
+   * Returns: { reachable: true } or { reachable: false, reason: "cert"|"network" }
+   */
+  async checkReachability() {
+    // Skip check for localhost (fake bridge)
+    if (this._bridgeIp?.startsWith("localhost")) {
+      try {
+        const res = await fetch(`${this._bridgeOrigin()}/api`);
+        return { reachable: true };
+      } catch {
+        return { reachable: false, reason: "network" };
+      }
+    }
+
     try {
-      const res = await fetch(`${this._baseUrl()}/resource/light`, {
-        headers: this._headers(),
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`https://${this._bridgeIp}/api`, {
+        method: "GET",
+        signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      this._connected = true;
-      return { success: true };
+      clearTimeout(timeout);
+      // Any response means cert is accepted and bridge is reachable
+      return { reachable: true };
     } catch (err) {
-      this._connected = false;
-      return { success: false, error: err.message };
+      if (err.name === "AbortError") {
+        return { reachable: false, reason: "network" };
+      }
+      return { reachable: false, reason: "cert" };
     }
   },
 
   /**
-   * Get all lights registered on the bridge.
-   * Each light has: id, metadata.name, on.on, dimming.brightness, color.xy
+   * Test connection. Checks cert first, then tries v2, then v1.
    */
+  async testConnection() {
+    // Step 1: Reachability check
+    const reach = await this.checkReachability();
+    if (!reach.reachable) {
+      this._connected = false;
+      if (reach.reason === "cert") {
+        return {
+          success: false,
+          needsCert: true,
+          certUrl: this.getCertAcceptUrl(),
+          error: "Cannot reach the bridge — you need to accept its security certificate first.",
+        };
+      }
+      return {
+        success: false,
+        error: "Cannot reach the bridge. Check the IP address and make sure you're on the same network.",
+      };
+    }
+
+    // Step 2: Try CLIP v2
+    try {
+      const res = await fetch(`${this._baseUrlV2()}/resource/light`, {
+        headers: this._headersV2(),
+      });
+      if (res.ok) {
+        this._connected = true;
+        this._apiVersion = "v2";
+        return { success: true, apiVersion: "v2" };
+      }
+      if (res.status === 403 || res.status === 401) {
+        this._connected = false;
+        return { success: false, error: "Invalid API key." };
+      }
+    } catch {
+      // v2 failed, try v1
+    }
+
+    // Step 3: Fallback to v1
+    try {
+      const res = await fetch(`${this._baseUrlV1()}/lights`, {
+        headers: this._headersV1(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data[0]?.error) {
+          this._connected = false;
+          return { success: false, error: `API key rejected: ${data[0].error.description}` };
+        }
+        this._connected = true;
+        this._apiVersion = "v1";
+        return { success: true, apiVersion: "v1" };
+      }
+    } catch {
+      // Both failed
+    }
+
+    this._connected = false;
+    return { success: false, error: "Connected to bridge but API calls failed. Check your API key." };
+  },
+
+  // ════════════════════════════════════════════════════════════
+  // LIGHT CONTROL — uses the right API version automatically
+  // ════════════════════════════════════════════════════════════
+
   async getLights() {
-    const res = await fetch(`${this._baseUrl()}/resource/light`, {
-      headers: this._headers(),
-    });
-    if (!res.ok) throw new Error("Failed to fetch lights");
-    const data = await res.json();
-    return data.data || [];
+    if (this._apiVersion === "v2") {
+      const res = await fetch(`${this._baseUrlV2()}/resource/light`, { headers: this._headersV2() });
+      if (!res.ok) throw new Error("Failed to fetch lights");
+      const data = await res.json();
+      return data.data || [];
+    } else {
+      const res = await fetch(`${this._baseUrlV1()}/lights`, { headers: this._headersV1() });
+      if (!res.ok) throw new Error("Failed to fetch lights");
+      const data = await res.json();
+      return Object.entries(data).map(([id, light]) => ({
+        id,
+        metadata: { name: light.name },
+        on: { on: light.state?.on },
+        dimming: { brightness: light.state?.bri },
+        color: light.state?.xy ? { xy: { x: light.state.xy[0], y: light.state.xy[1] } } : undefined,
+      }));
+    }
   },
 
-  /**
-   * Get all rooms configured on the bridge.
-   * Each room has: id, metadata.name, children (devices), services (grouped_light)
-   */
   async getRooms() {
-    const res = await fetch(`${this._baseUrl()}/resource/room`, {
-      headers: this._headers(),
-    });
-    if (!res.ok) throw new Error("Failed to fetch rooms");
-    const data = await res.json();
-    return data.data || [];
+    if (this._apiVersion === "v2") {
+      const res = await fetch(`${this._baseUrlV2()}/resource/room`, { headers: this._headersV2() });
+      if (!res.ok) throw new Error("Failed to fetch rooms");
+      const data = await res.json();
+      return data.data || [];
+    } else {
+      const res = await fetch(`${this._baseUrlV1()}/groups`, { headers: this._headersV1() });
+      if (!res.ok) throw new Error("Failed to fetch rooms");
+      const data = await res.json();
+      return Object.entries(data)
+        .filter(([, group]) => group.type === "Room")
+        .map(([id, group]) => ({
+          id,
+          metadata: { name: group.name },
+          children: (group.lights || []).map((lid) => ({ rtype: "device", rid: lid })),
+          services: [{ rtype: "grouped_light", rid: id }],
+        }));
+    }
   },
 
-  /**
-   * Set a single light's color and brightness.
-   * @param {string} lightId - The light resource ID
-   * @param {{ x: number, y: number }} color - CIE xy color coordinates
-   * @param {number} brightness - 0 to 100
-   */
   async setLightColor(lightId, color, brightness = 100) {
-    const body = {
-      on: { on: true },
-      dimming: { brightness },
-      color: { xy: { x: color.x, y: color.y } },
-    };
-    const res = await fetch(`${this._baseUrl()}/resource/light/${lightId}`, {
-      method: "PUT",
-      headers: this._headers(),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Failed to set light ${lightId}`);
-    return res.json();
+    if (this._apiVersion === "v2") {
+      const body = { on: { on: true }, dimming: { brightness }, color: { xy: { x: color.x, y: color.y } } };
+      const res = await fetch(`${this._baseUrlV2()}/resource/light/${lightId}`, { method: "PUT", headers: this._headersV2(), body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`Failed to set light ${lightId}`);
+      return res.json();
+    } else {
+      const body = { on: true, bri: Math.round((brightness / 100) * 254), xy: [color.x, color.y] };
+      const res = await fetch(`${this._baseUrlV1()}/lights/${lightId}/state`, { method: "PUT", headers: this._headersV1(), body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`Failed to set light ${lightId}`);
+      return res.json();
+    }
   },
 
-  /**
-   * Set ALL lights in a room at once (recommended — counts as 1 API call).
-   * @param {string} groupId - The grouped_light resource ID
-   * @param {{ x: number, y: number }} color - CIE xy color coordinates
-   * @param {number} brightness - 0 to 100
-   */
   async setGroupedLightColor(groupId, color, brightness = 100) {
-    const body = {
-      on: { on: true },
-      dimming: { brightness },
-      color: { xy: { x: color.x, y: color.y } },
-    };
-    const res = await fetch(
-      `${this._baseUrl()}/resource/grouped_light/${groupId}`,
-      {
-        method: "PUT",
-        headers: this._headers(),
-        body: JSON.stringify(body),
-      }
-    );
-    if (!res.ok) throw new Error(`Failed to set group ${groupId}`);
-    return res.json();
+    if (this._apiVersion === "v2") {
+      const body = { on: { on: true }, dimming: { brightness }, color: { xy: { x: color.x, y: color.y } } };
+      const res = await fetch(`${this._baseUrlV2()}/resource/grouped_light/${groupId}`, { method: "PUT", headers: this._headersV2(), body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`Failed to set group ${groupId}`);
+      return res.json();
+    } else {
+      const body = { on: true, bri: Math.round((brightness / 100) * 254), xy: [color.x, color.y] };
+      const res = await fetch(`${this._baseUrlV1()}/groups/${groupId}/action`, { method: "PUT", headers: this._headersV1(), body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`Failed to set group ${groupId}`);
+      return res.json();
+    }
   },
 
-  /**
-   * Turn off a single light.
-   */
   async turnOff(lightId) {
-    const res = await fetch(`${this._baseUrl()}/resource/light/${lightId}`, {
-      method: "PUT",
-      headers: this._headers(),
-      body: JSON.stringify({ on: { on: false } }),
-    });
-    if (!res.ok) throw new Error(`Failed to turn off ${lightId}`);
-    return res.json();
+    if (this._apiVersion === "v2") {
+      const res = await fetch(`${this._baseUrlV2()}/resource/light/${lightId}`, { method: "PUT", headers: this._headersV2(), body: JSON.stringify({ on: { on: false } }) });
+      if (!res.ok) throw new Error(`Failed to turn off ${lightId}`);
+      return res.json();
+    } else {
+      const res = await fetch(`${this._baseUrlV1()}/lights/${lightId}/state`, { method: "PUT", headers: this._headersV1(), body: JSON.stringify({ on: false }) });
+      if (!res.ok) throw new Error(`Failed to turn off ${lightId}`);
+      return res.json();
+    }
   },
 
-  /**
-   * Turn off ALL lights in a room.
-   */
   async turnOffGroup(groupId) {
-    const res = await fetch(
-      `${this._baseUrl()}/resource/grouped_light/${groupId}`,
-      {
-        method: "PUT",
-        headers: this._headers(),
-        body: JSON.stringify({ on: { on: false } }),
-      }
-    );
-    if (!res.ok) throw new Error(`Failed to turn off group ${groupId}`);
-    return res.json();
+    if (this._apiVersion === "v2") {
+      const res = await fetch(`${this._baseUrlV2()}/resource/grouped_light/${groupId}`, { method: "PUT", headers: this._headersV2(), body: JSON.stringify({ on: { on: false } }) });
+      if (!res.ok) throw new Error(`Failed to turn off group ${groupId}`);
+      return res.json();
+    } else {
+      const res = await fetch(`${this._baseUrlV1()}/groups/${groupId}/action`, { method: "PUT", headers: this._headersV1(), body: JSON.stringify({ on: false }) });
+      if (!res.ok) throw new Error(`Failed to turn off group ${groupId}`);
+      return res.json();
+    }
   },
 
-  /**
-   * Trigger a "breathe" alert on a light (single pulse effect).
-   * Useful for grabbing attention.
-   */
   async signalLight(lightId) {
-    const res = await fetch(`${this._baseUrl()}/resource/light/${lightId}`, {
-      method: "PUT",
-      headers: this._headers(),
-      body: JSON.stringify({ alert: { action: "breathe" } }),
-    });
-    return res.json();
+    if (this._apiVersion === "v2") {
+      const res = await fetch(`${this._baseUrlV2()}/resource/light/${lightId}`, { method: "PUT", headers: this._headersV2(), body: JSON.stringify({ alert: { action: "breathe" } }) });
+      return res.json();
+    } else {
+      const res = await fetch(`${this._baseUrlV1()}/lights/${lightId}/state`, { method: "PUT", headers: this._headersV1(), body: JSON.stringify({ alert: "lselect" }) });
+      return res.json();
+    }
   },
 };
 

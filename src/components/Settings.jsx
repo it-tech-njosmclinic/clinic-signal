@@ -1,5 +1,6 @@
 import { useState } from "react";
 import SIGNALS from "../config/signals";
+import HueBridgeService from "../services/hueBridge";
 import styles from "./Settings.module.css";
 
 export default function Settings({
@@ -11,6 +12,10 @@ export default function Settings({
   onConnect,
   onDisconnect,
   connectionError,
+  needsCert,
+  certUrl,
+  onRetryAfterCert,
+  apiVersion,
 }) {
   const [showKey, setShowKey] = useState(false);
 
@@ -20,8 +25,8 @@ export default function Settings({
       <section className={styles.section}>
         <h2 className={styles.title}>Hue Bridge Connection</h2>
         <p className={styles.desc}>
-          Connect to your Philips Hue Bridge to control real lights. See the
-          README for detailed setup instructions.
+          Connect to your Philips Hue Bridge to control real lights. Works from
+          any device on the same network as the bridge.
         </p>
 
         <div className={styles.field}>
@@ -34,7 +39,7 @@ export default function Settings({
             className={styles.input}
           />
           <span className={styles.hint}>
-            Find this in the Hue app → Settings → Hue Bridges
+            Find this in the Hue app → Settings → Hue Bridges → (i) icon
           </span>
         </div>
 
@@ -57,8 +62,66 @@ export default function Settings({
           </div>
         </div>
 
-        {connectionError && (
+        {/* Certificate acceptance prompt */}
+        {needsCert && certUrl && (
+          <div className={styles.certBox}>
+            <div className={styles.certHeader}>
+              <span className={styles.certIcon}>🔒</span>
+              <strong>Certificate Required</strong>
+            </div>
+            <p className={styles.certText}>
+              The Hue Bridge uses a self-signed security certificate. Your
+              browser blocks requests to it until you accept the certificate.
+              This is a one-time step.
+            </p>
+            <div className={styles.certSteps}>
+              <div className={styles.certStep}>
+                <span className={styles.stepNum}>1</span>
+                <span>
+                  Click the button below to open the bridge in a new tab
+                </span>
+              </div>
+              <div className={styles.certStep}>
+                <span className={styles.stepNum}>2</span>
+                <span>
+                  Click <strong>"Advanced"</strong> → then{" "}
+                  <strong>"Proceed"</strong> (or "Accept the Risk")
+                </span>
+              </div>
+              <div className={styles.certStep}>
+                <span className={styles.stepNum}>3</span>
+                <span>Come back here and click "Retry Connection"</span>
+              </div>
+            </div>
+            <div className={styles.certActions}>
+              <a
+                href={certUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.certLink}
+              >
+                Open Bridge (Accept Certificate) →
+              </a>
+              <button onClick={onRetryAfterCert} className={styles.retryBtn}>
+                Retry Connection
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Regular error (not cert-related) */}
+        {connectionError && !needsCert && (
           <p className={styles.error}>{connectionError}</p>
+        )}
+
+        {/* Connected success indicator */}
+        {connected && (
+          <div className={styles.connectedBox}>
+            <span className={styles.connectedDot} />
+            <span>
+              Connected via API {apiVersion || ""}
+            </span>
+          </div>
         )}
 
         <div className={styles.actions}>
@@ -107,9 +170,15 @@ export default function Settings({
         <h2 className={styles.title}>Quick Reference</h2>
         <div className={styles.notes}>
           <p>
-            <strong>Local-first:</strong> All communication happens directly
-            between this browser and the Hue Bridge on your WiFi. No internet
-            needed.
+            <strong>How it works:</strong> This app runs in your browser and
+            talks directly to the Hue Bridge on your local WiFi. The Vercel
+            hosting just delivers the app code — all bridge communication
+            happens locally.
+          </p>
+          <p>
+            <strong>First time setup:</strong> You'll need to accept the
+            bridge's security certificate once. The app will guide you through
+            this automatically.
           </p>
           <p>
             <strong>Rate limits:</strong> The Hue Bridge handles ~10
@@ -118,11 +187,6 @@ export default function Settings({
           <p>
             <strong>Add rooms:</strong> Rooms are configured in the Hue app.
             Once connected, this app auto-discovers them.
-          </p>
-          <p>
-            <strong>Add signals:</strong> Edit{" "}
-            <code className={styles.code}>src/config/signals.js</code> to add
-            new colors/messages.
           </p>
         </div>
       </section>

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import HueBridgeService from "./services/hueBridge";
 import SIGNALS from "./config/signals";
 import DEMO_ROOMS from "./config/demoRooms";
@@ -10,7 +10,6 @@ import styles from "./App.module.css";
 
 // ============================================================
 // ACTIVITY LOG HOOK
-// In-memory for now. To persist: swap this with a DB call.
 // ============================================================
 function useActivityLog() {
   const [logs, setLogs] = useState([]);
@@ -38,12 +37,19 @@ export default function App() {
   // Navigation
   const [view, setView] = useState("control");
 
-  // Bridge connection
-  const [bridgeIp, setBridgeIp] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // Bridge connection — load saved credentials from localStorage
+  const [bridgeIp, setBridgeIp] = useState(
+    () => localStorage.getItem("clinic-signal-ip") || ""
+  );
+  const [apiKey, setApiKey] = useState(
+    () => localStorage.getItem("clinic-signal-key") || ""
+  );
   const [connected, setConnected] = useState(false);
   const [demoMode, setDemoMode] = useState(true);
   const [connectionError, setConnectionError] = useState("");
+  const [needsCert, setNeedsCert] = useState(false);
+  const [certUrl, setCertUrl] = useState("");
+  const [apiVersion, setApiVersion] = useState("");
 
   // Room & signal state
   const [rooms, setRooms] = useState(DEMO_ROOMS);
@@ -56,6 +62,15 @@ export default function App() {
   // Activity log
   const { logs, addLog } = useActivityLog();
 
+  // ── Save credentials to localStorage when they change ──
+  useEffect(() => {
+    if (bridgeIp) localStorage.setItem("clinic-signal-ip", bridgeIp);
+  }, [bridgeIp]);
+
+  useEffect(() => {
+    if (apiKey) localStorage.setItem("clinic-signal-key", apiKey);
+  }, [apiKey]);
+
   // ── Toast helper ──
   const showToast = useCallback((message, type = "success") => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -67,16 +82,22 @@ export default function App() {
   const handleConnect = async () => {
     if (!bridgeIp || !apiKey) {
       setConnectionError("Please enter both Bridge IP and API key.");
+      setNeedsCert(false);
       return;
     }
+
     setConnectionError("");
+    setNeedsCert(false);
+    setCertUrl("");
+
     HueBridgeService.configure(bridgeIp, apiKey);
     const result = await HueBridgeService.testConnection();
 
     if (result.success) {
       setConnected(true);
       setDemoMode(false);
-      showToast("Connected to Hue Bridge");
+      setApiVersion(result.apiVersion || "");
+      showToast(`Connected via API ${result.apiVersion}`);
 
       // Fetch real rooms from bridge
       try {
@@ -95,16 +116,28 @@ export default function App() {
       } catch {
         // Keep demo rooms if fetch fails
       }
+    } else if (result.needsCert) {
+      // Certificate needs to be accepted
+      setNeedsCert(true);
+      setCertUrl(result.certUrl || HueBridgeService.getCertAcceptUrl());
+      setConnectionError(result.error);
     } else {
-      setConnectionError(
-        `Connection failed: ${result.error}. Check IP, API key, and that you've accepted the bridge's HTTPS certificate.`
-      );
+      setConnectionError(result.error);
     }
+  };
+
+  // ── Retry after user accepts certificate ──
+  const handleRetryAfterCert = async () => {
+    setNeedsCert(false);
+    setCertUrl("");
+    setConnectionError("");
+    await handleConnect();
   };
 
   const handleDisconnect = () => {
     setConnected(false);
     setDemoMode(true);
+    setApiVersion("");
     setRooms(DEMO_ROOMS);
     setRoomSignals({});
     showToast("Disconnected — demo mode", "info");
@@ -117,7 +150,6 @@ export default function App() {
     if (!room || !signal) return;
 
     try {
-      // Only call the real API if connected
       if (!demoMode && connected) {
         if (signal.id === "clear") {
           if (room.groupedLightId) {
@@ -144,7 +176,6 @@ export default function App() {
         }
       }
 
-      // Update local state
       if (signal.id === "clear") {
         setRoomSignals((prev) => {
           const next = { ...prev };
@@ -214,7 +245,6 @@ export default function App() {
           </button>
         ))}
 
-        {/* Clear all button (only on control panel when signals are active) */}
         {view === "control" && Object.keys(roomSignals).length > 0 && (
           <button onClick={clearAll} className={styles.clearAllBtn}>
             Clear All
@@ -249,6 +279,10 @@ export default function App() {
             onConnect={handleConnect}
             onDisconnect={handleDisconnect}
             connectionError={connectionError}
+            needsCert={needsCert}
+            certUrl={certUrl}
+            onRetryAfterCert={handleRetryAfterCert}
+            apiVersion={apiVersion}
           />
         )}
       </main>
